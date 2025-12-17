@@ -3,6 +3,8 @@ use tokio::sync::mpsc::{Receiver, Sender};
 
 // Need some way to handle data transfer
 pub struct MeshNode {
+    pub x: u8,
+    pub y: u8,
     pub tx_rate: u64,
     pub rx_rate: u64,
 
@@ -12,26 +14,27 @@ pub struct MeshNode {
     pub(crate) tx_down: Option<Sender<Packet>>,
     pub(crate) tx_left: Option<Sender<Packet>>,
     pub(crate) tx_right: Option<Sender<Packet>>,
-
-    pub(crate) rx_up: Option<Receiver<Packet>>,
-    pub(crate) rx_down: Option<Receiver<Packet>>,
-    pub(crate) rx_left: Option<Receiver<Packet>>,
-    pub(crate) rx_right: Option<Receiver<Packet>>,
+    //    pub(crate) rx_up: Option<Receiver<Packet>>,
+    //    pub(crate) rx_down: Option<Receiver<Packet>>,
+    //    pub(crate) rx_left: Option<Receiver<Packet>>,
+    //    pub(crate) rx_right: Option<Receiver<Packet>>,
 }
 
 impl MeshNode {
-    pub fn init_channeless(tx_rate: u64, rx_rate: u64) -> Self {
+    pub fn init_channeless(x: u8, y: u8, tx_rate: u64, rx_rate: u64) -> Self {
         Self {
+            x,
+            y,
             tx_rate,
             rx_rate,
             tx_up: None,
             tx_down: None,
             tx_left: None,
             tx_right: None,
-            rx_up: None,
-            rx_down: None,
-            rx_left: None,
-            rx_right: None,
+            //           rx_up: None,
+            //           rx_down: None,
+            //           rx_left: None,
+            //           rx_right: None,
         }
     }
 }
