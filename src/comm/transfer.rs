@@ -1,10 +1,9 @@
 use thiserror::Error;
 use tokio::select;
 use tokio::sync::mpsc::error::SendError;
-use tokio::sync::mpsc::{Receiver, Sender};
+use tokio::sync::mpsc::{Receiver, Sender, UnboundedSender};
 
-use crate::arch::node::MeshNode;
-use crate::comm::packet::Packet;
+use crate::comm::packet::{Event, Packet};
 
 #[derive(Copy, Clone, Default, Debug)]
 pub enum Direction {
@@ -36,7 +35,11 @@ pub enum NodeCommError {
     #[error(
         "Channel unable to send packets: Check corresponding Receiver is alive and the channel is open"
     )]
-    SendError(#[from] SendError<Packet>),
+    SendErrorPacket(#[from] SendError<Packet>),
+    #[error(
+        "Channel unable to send events: Check corresponding Receiver is alive and the channel is open"
+    )]
+    SendErrorEvent(#[from] SendError<Event>),
 }
 
 // We can be receiving data while processing/sending data - account for this
@@ -55,58 +58,6 @@ pub enum NodeCommError {
 //      packets in some way
 //      - For now we'll simulate it as if every node in the middle is simply routing, but a V2
 //      might simulate both router and cpu running at the same time -> local channel?
-impl MeshNode {
-    // Calculating the two best greediest moves, second best is for if one is invalidated due to turn
-    // restriction routing
-    // Turn restriction routing accounts for most edge cases, unless the node is on the edge
-    // Need to account for reaching the edges of the grid
-    pub fn greedy_move(src_pos: (u8, u8), dest_pos: (u8, u8)) -> [Direction; 2] {
-        let x_delta = dest_pos.0 as i16 - src_pos.0 as i16;
-        let y_delta = dest_pos.1 as i16 - src_pos.1 as i16;
-
-        if (x_delta == 0) && (y_delta == 0) {
-            panic!("Target node reached");
-        }
-
-        if x_delta > 0 && y_delta > 0 {
-            [Direction::Down, Direction::Right]
-        } else if x_delta > 0 && y_delta < 0 {
-            [Direction::Right, Direction::Up]
-        } else if x_delta < 0 && y_delta > 0 {
-            [Direction::Left, Direction::Down]
-        } else if x_delta < 0 && y_delta < 0 {
-            [Direction::Left, Direction::Up]
-        } else if x_delta == 0 && y_delta < 0 {
-            [Direction::Up, Direction::Down]
-        } else if x_delta == 0 && y_delta > 0 {
-            [Direction::Down, Direction::Up]
-        } else if y_delta == 0 && x_delta < 0 {
-            [Direction::Left, Direction::Right]
-        } else
-        /* y_delta == 0 && x_delta > 0 */
-        {
-            [Direction::Right, Direction::Left]
-        }
-    }
-
-    // Initially will implement simple turn restriction routing to prevent deadlocking
-    //  - For turn restriction needs to know the prev. direction to detect banned turns
-    //  - Uses Negative First Routing, so Left->Down and Up->Left are disallowed paths
-    // Can expand do adaptive routing later
-    fn calc_route(&self, dest: (u8, u8), prev_dir: &Direction) -> Direction {
-        let greedy_preferences = MeshNode::greedy_move((self.x, self.y), (dest.0, dest.1));
-        print!("{:?}", greedy_preferences);
-
-        if matches!(
-            (prev_dir, &greedy_preferences[0]),
-            (Direction::Up, Direction::Left) | (Direction::Right, Direction::Down)
-        ) {
-            greedy_preferences[1]
-        } else {
-            greedy_preferences[0]
-        }
-    }
-}
 
 fn turn_restrict(
     path_vec: &mut Vec<Direction>,
@@ -187,67 +138,76 @@ pub async fn receive_packets(
     mut rx_down: Option<Receiver<Packet>>,
     mut rx_left: Option<Receiver<Packet>>,
     mut rx_right: Option<Receiver<Packet>>,
-    inner_tx_up: Sender<Packet>,
-    inner_tx_down: Sender<Packet>,
-    inner_tx_left: Sender<Packet>,
-    inner_tx_right: Sender<Packet>,
+    inner_tx_up: &Sender<Packet>,
+    inner_tx_down: &Sender<Packet>,
+    inner_tx_left: &Sender<Packet>,
+    inner_tx_right: &Sender<Packet>,
+    event_tx: &UnboundedSender<Event>,
 ) -> Result<(), NodeCommError> {
     loop {
         // let node_clone = Arc::clone(&node);
         select! {
-            Some(packet) = async {
+            Some(mut packet) = async {
                 if let Some(rx) = rx_up.as_mut() {
                     rx.recv().await
                 } else {
                     std::future::pending().await
                 }
             } => {
-                println!(" -> Receiving from up!\n");
                 if packet.header.path_step == packet.header.path.len() {
-                        panic!("Packet reached destination");
+                        event_tx.send(Event::PacketArrived { id: packet.header.id, at: packet.header.destination })?;
+                        continue;
                 }
+                packet.header.cur_pos = (packet.header.cur_pos.0, packet.header.cur_pos.1 + 1);
+                event_tx.send(Event::PacketReceived { id: packet.header.id, recv_dir: Direction::Up, at: packet.header.cur_pos })?;
                 inner_tx_up.send(packet).await?;
                 // tokio::spawn(async move { send_packet(node_clone, packet).await });
             },
-            Some(packet) = async {
+            Some(mut packet) = async {
                 if let Some(rx) = rx_down.as_mut() {
                     rx.recv().await
                 } else {
                     std::future::pending().await
                 }
             } => {
-                println!(" -> Receiving from down!\n");
                 if packet.header.path_step == packet.header.path.len() {
-                        panic!("Packet reached destination");
+                        event_tx.send(Event::PacketArrived { id: packet.header.id, at: packet.header.destination })?;
+                        continue;
                 }
+                packet.header.cur_pos = (packet.header.cur_pos.0, packet.header.cur_pos.1 - 1);
+                event_tx.send(Event::PacketReceived { id: packet.header.id, recv_dir: Direction::Down, at: packet.header.cur_pos })?;
                 inner_tx_down.send(packet).await?;
                 // tokio::spawn(async move { send_packet(node_clone, packet).await });
             },
-            Some(packet) = async {
+            Some(mut packet) = async {
                 if let Some(rx) = rx_left.as_mut() {
                     rx.recv().await
                 } else {
                     std::future::pending().await
                 }
             } => {
-                println!(" -> Receiving from left!\n");
                 if packet.header.path_step == packet.header.path.len() {
-                        panic!("Packet reached destination");
+                        event_tx.send(Event::PacketArrived { id: packet.header.id, at: packet.header.destination })?;
+                        continue;
                 }
+                packet.header.cur_pos = (packet.header.cur_pos.0 + 1, packet.header.cur_pos.1);
+                event_tx.send(Event::PacketReceived { id: packet.header.id, recv_dir: Direction::Left, at: packet.header.cur_pos })?;
                 inner_tx_left.send(packet).await?;
                 // tokio::spawn(async move { send_packet(node_clone, packet).await });
             },
-            Some(packet) = async {
+            Some(mut packet) = async {
                 if let Some(rx) = rx_right.as_mut() {
                     rx.recv().await
                 } else {
                     std::future::pending().await
                 }
             } => {
-                println!(" -> Receiving from right!\n");
                 if packet.header.path_step == packet.header.path.len() {
-                        panic!("Packet reached destination");
+                        event_tx.send(Event::PacketArrived { id: packet.header.id, at: packet.header.destination })?;
+                        continue;
                 }
+                packet.header.cur_pos = (packet.header.cur_pos.0 - 1, packet.header.cur_pos.1);
+                event_tx.send(Event::PacketReceived { id: packet.header.id, recv_dir: Direction::Right, at: packet.header.cur_pos })?;
                 inner_tx_right.send(packet).await?;
                 // tokio::spawn(async move { send_packet(node_clone, packet).await });
             },
@@ -260,10 +220,11 @@ pub async fn receive_packets(
 pub async fn send_packet(
     // node: Arc<MeshNode>,
     // mut packet: Packet,
-    tx_up: Option<Sender<Packet>>,
-    tx_down: Option<Sender<Packet>>,
-    tx_left: Option<Sender<Packet>>,
-    tx_right: Option<Sender<Packet>>,
+    tx_up: Option<&Sender<Packet>>,
+    tx_down: Option<&Sender<Packet>>,
+    tx_left: Option<&Sender<Packet>>,
+    tx_right: Option<&Sender<Packet>>,
+    tx_event: &UnboundedSender<Event>,
     mut inner_rx_up: Receiver<Packet>,
     mut inner_rx_down: Receiver<Packet>,
     mut inner_rx_left: Receiver<Packet>,
@@ -273,19 +234,19 @@ pub async fn send_packet(
     loop {
         select! {
             Some(inner_packet) = inner_rx_up.recv() => {
-                transmit_dir(inner_packet, tx_up.as_ref(), tx_down.as_ref(), tx_left.as_ref(), tx_right.as_ref()).await?
+                transmit_dir(inner_packet, tx_up, tx_down, tx_left, tx_right, &tx_event).await?
             }
             Some(inner_packet) = inner_rx_down.recv() => {
-                transmit_dir(inner_packet, tx_up.as_ref(), tx_down.as_ref(), tx_left.as_ref(), tx_right.as_ref()).await?
+                transmit_dir(inner_packet, tx_up, tx_down, tx_left, tx_right, &tx_event).await?
             }
             Some(inner_packet) = inner_rx_left.recv() => {
-                transmit_dir(inner_packet, tx_up.as_ref(), tx_down.as_ref(), tx_left.as_ref(), tx_right.as_ref()).await?
+                transmit_dir(inner_packet, tx_up, tx_down, tx_left, tx_right, &tx_event).await?
             }
             Some(inner_packet) = inner_rx_right.recv() => {
-                transmit_dir(inner_packet, tx_up.as_ref(), tx_down.as_ref(), tx_left.as_ref(), tx_right.as_ref()).await?
+                transmit_dir(inner_packet, tx_up, tx_down, tx_left, tx_right, &tx_event).await?
             },
             Some(inner_packet) = inner_rx_local.recv() => {
-                transmit_dir(inner_packet, tx_up.as_ref(), tx_down.as_ref(), tx_left.as_ref(), tx_right.as_ref()).await?
+                transmit_dir(inner_packet, tx_up, tx_down, tx_left, tx_right, &tx_event).await?
             }
         }
     }
@@ -297,34 +258,51 @@ async fn transmit_dir(
     tx_down: Option<&Sender<Packet>>,
     tx_left: Option<&Sender<Packet>>,
     tx_right: Option<&Sender<Packet>>,
+    tx_event: &UnboundedSender<Event>,
 ) -> Result<(), NodeCommError> {
     packet.header.dir = packet.header.path[packet.header.path_step];
     packet.header.path_step += 1;
 
     match packet.header.dir {
         Direction::Up => {
-            print!(" -> Chose up");
+            tx_event.send(Event::PacketSent {
+                id: packet.header.id,
+                send_dir: Direction::Up,
+                from: packet.header.cur_pos,
+            })?;
             tx_up
                 .expect("Up direction should've been supported")
                 .send(packet)
                 .await?
         }
         Direction::Down => {
-            print!(" -> Chose down");
+            tx_event.send(Event::PacketSent {
+                id: packet.header.id,
+                send_dir: Direction::Down,
+                from: packet.header.cur_pos,
+            })?;
             tx_down
                 .expect("Down direction should've been supported")
                 .send(packet)
                 .await?
         }
         Direction::Left => {
-            print!(" -> Chose left");
+            tx_event.send(Event::PacketSent {
+                id: packet.header.id,
+                send_dir: Direction::Left,
+                from: packet.header.cur_pos,
+            })?;
             tx_left
                 .expect("Left direction should've been supported")
                 .send(packet)
                 .await?
         }
         Direction::Right => {
-            print!(" -> Chose right");
+            tx_event.send(Event::PacketSent {
+                id: packet.header.id,
+                send_dir: Direction::Right,
+                from: packet.header.cur_pos,
+            })?;
             tx_right
                 .expect("Right direction should've been supported")
                 .send(packet)

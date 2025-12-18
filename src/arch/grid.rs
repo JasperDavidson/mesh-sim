@@ -1,12 +1,11 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use thiserror::Error;
-use tokio::sync::mpsc;
+use tokio::sync::mpsc::{self, UnboundedReceiver};
 use tokio::sync::mpsc::{Receiver, Sender};
 
 use crate::arch::node::MeshNode;
-use crate::comm::packet::Packet;
-use crate::comm::transfer::Direction;
+use crate::comm::packet::{Event, Packet};
 use crate::comm::transfer::NodeCommError;
 use crate::comm::transfer::{calc_path, receive_packets, send_packet};
 
@@ -35,7 +34,7 @@ impl Grid {
     // - Maybe doing a transmit pass where we build all the channels and store the transmitters in
     // the structs and store the receivers in a map based on coordinate, then a receive pass that
     // checks the map for each node and provides the receivers
-    pub fn init_grid(&mut self, width: u8, height: u8) {
+    pub fn init_grid(&mut self, width: u8, height: u8) -> UnboundedReceiver<Event> {
         // Collection to hold rx channels for second connection pass
         #[derive(Default)]
         struct ChannelHolder {
@@ -50,6 +49,7 @@ impl Grid {
         }
         let mut rx_local_map: HashMap<(u8, u8), Receiver<Packet>> = HashMap::new();
         let mut channel_map: HashMap<(u8, u8), ChannelHolder> = HashMap::new();
+        let (event_tx, event_rx) = mpsc::unbounded_channel::<Event>();
 
         let mut temp_nodes: Vec<Vec<MeshNode>> = Vec::new();
         for y in 0..height {
@@ -135,26 +135,30 @@ impl Grid {
                 let (inner_tx_right, inner_rx_right) = mpsc::channel(INNER_BUFFER_SIZE);
 
                 if let Some(inner_rx_local) = rx_local_map.remove(&(x, y)) {
+                    let tx_event_receive = event_tx.clone();
+                    let tx_event_send = event_tx.clone();
                     tokio::spawn(async move {
                         receive_packets(
                             rx_up,
                             rx_down,
                             rx_left,
                             rx_right,
-                            inner_tx_up,
-                            inner_tx_down,
-                            inner_tx_left,
-                            inner_tx_right,
+                            &inner_tx_up,
+                            &inner_tx_down,
+                            &inner_tx_left,
+                            &inner_tx_right,
+                            &tx_event_receive,
                         )
                         .await
                     });
 
                     tokio::spawn(async move {
                         send_packet(
-                            tx_up,
-                            tx_down,
-                            tx_left,
-                            tx_right,
+                            tx_up.as_ref(),
+                            tx_down.as_ref(),
+                            tx_left.as_ref(),
+                            tx_right.as_ref(),
+                            &tx_event_send,
                             inner_rx_up,
                             inner_rx_down,
                             inner_rx_left,
@@ -168,6 +172,8 @@ impl Grid {
                 }
             }
         }
+
+        event_rx
     }
 
     pub fn access_node(&self, (x, y): (u8, u8)) -> Result<&MeshNode, GridAccessError> {

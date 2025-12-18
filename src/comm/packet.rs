@@ -1,5 +1,22 @@
 use crate::comm::transfer::Direction;
 
+pub enum Event {
+    PacketArrived {
+        id: usize,
+        at: (u8, u8),
+    },
+    PacketReceived {
+        id: usize,
+        recv_dir: Direction,
+        at: (u8, u8),
+    },
+    PacketSent {
+        id: usize,
+        send_dir: Direction,
+        from: (u8, u8),
+    },
+}
+
 #[derive(Default, Debug)]
 enum PacketData {
     Message(String),
@@ -14,6 +31,7 @@ pub struct MetaData {
     pub dir: Direction,
     pub path: Vec<Direction>,
     pub path_step: usize,
+    pub cur_pos: (u8, u8),
     pub destination: (u8, u8),
 }
 
