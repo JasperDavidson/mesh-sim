@@ -1,12 +1,7 @@
 mod arch;
 mod comm;
-use crate::{
-    arch::grid::Grid,
-    arch::grid::send_packet_grid,
-    comm::packet::{self, Packet},
-};
+use crate::{arch::grid::Grid, arch::grid::send_packet_grid, comm::packet::Packet};
 use std::sync::Arc;
-use tokio::time::{Duration, sleep};
 
 #[tokio::main]
 async fn main() {
@@ -20,6 +15,5 @@ async fn main() {
             .expect("Failed to send packet");
     }
 
-    sleep(Duration::from_micros(1)).await;
-    // tokio::signal::ctrl_c().await.unwrap();
+    tokio::signal::ctrl_c().await.unwrap();
 }

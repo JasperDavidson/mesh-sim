@@ -10,7 +10,10 @@ enum PacketData {
 
 #[derive(Default, Debug)]
 pub struct MetaData {
+    pub id: usize,
     pub dir: Direction,
+    pub path: Vec<Direction>,
+    pub path_step: usize,
     pub destination: (u8, u8),
 }
 
@@ -20,3 +23,9 @@ pub struct Packet {
     pub header: MetaData,
     data: PacketData,
 }
+
+//impl Packet {
+//    pub fn new(data: u64) -> Self {
+//        let metadata = MetaData { id:  };
+//    }
+//}
