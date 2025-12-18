@@ -26,6 +26,7 @@ pub enum GridAccessError {
 pub struct Grid {
     // nodes: Vec<Vec<Arc<MeshNode>>>,
     nodes: Arc<[Arc<[MeshNode]>]>,
+    packet_count: usize,
 }
 
 impl Grid {
@@ -34,7 +35,11 @@ impl Grid {
     // - Maybe doing a transmit pass where we build all the channels and store the transmitters in
     // the structs and store the receivers in a map based on coordinate, then a receive pass that
     // checks the map for each node and provides the receivers
-    pub fn init_grid(&mut self, width: u8, height: u8) -> UnboundedReceiver<Event> {
+    pub fn init_grid(
+        &mut self,
+        width: u8,
+        height: u8,
+    ) -> Result<UnboundedReceiver<Event>, GridAccessError> {
         // Collection to hold rx channels for second connection pass
         #[derive(Default)]
         struct ChannelHolder {
@@ -57,7 +62,7 @@ impl Grid {
 
             for x in 0..width {
                 let (tx_local, rx_local) = mpsc::channel::<Packet>(INNER_BUFFER_SIZE);
-                let cur_node = MeshNode::init_channeless(x, y, 10, 10, tx_local);
+                let cur_node = MeshNode::init_channeless(x, y, 5, 5, tx_local);
                 rx_local_map.insert((x, y), rx_local);
 
                 // Create channels based on position
@@ -137,6 +142,9 @@ impl Grid {
                 if let Some(inner_rx_local) = rx_local_map.remove(&(x, y)) {
                     let tx_event_receive = event_tx.clone();
                     let tx_event_send = event_tx.clone();
+                    let cur_node = self.access_node((x, y))?;
+                    let (tx_rate, rx_rate) = (cur_node.tx_rate, cur_node.rx_rate);
+
                     tokio::spawn(async move {
                         receive_packets(
                             rx_up,
@@ -148,6 +156,7 @@ impl Grid {
                             &inner_tx_left,
                             &inner_tx_right,
                             &tx_event_receive,
+                            tx_rate,
                         )
                         .await
                     });
@@ -164,6 +173,7 @@ impl Grid {
                             inner_rx_left,
                             inner_rx_right,
                             inner_rx_local,
+                            rx_rate,
                         )
                         .await
                     });
@@ -173,7 +183,7 @@ impl Grid {
             }
         }
 
-        event_rx
+        Ok(event_rx)
     }
 
     pub fn access_node(&self, (x, y): (u8, u8)) -> Result<&MeshNode, GridAccessError> {
@@ -193,11 +203,8 @@ impl Grid {
     pub async fn send_packet_grid(
         node: &MeshNode,
         mut packet: Packet,
-        dest_pos: (u8, u8),
     ) -> Result<(), NodeCommError> {
-        packet.header.destination = dest_pos;
-        packet.header.path = calc_path((node.x, node.y), dest_pos);
-
+        packet.header.path = calc_path(packet.header.cur_pos, packet.header.dest_pos);
         node.tx_local.send(packet).await?;
 
         Ok(())

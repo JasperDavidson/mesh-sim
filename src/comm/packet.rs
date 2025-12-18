@@ -1,9 +1,12 @@
-use crate::comm::transfer::Direction;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+use crate::comm::transfer::{Direction, calc_path};
 
 pub enum Event {
     PacketArrived {
         id: usize,
         at: (u8, u8),
+        dest: (u8, u8),
     },
     PacketReceived {
         id: usize,
@@ -18,7 +21,7 @@ pub enum Event {
 }
 
 #[derive(Default, Debug)]
-enum PacketData {
+pub enum PacketData {
     Message(String),
     Integer(u64),
     #[default]
@@ -32,7 +35,7 @@ pub struct MetaData {
     pub path: Vec<Direction>,
     pub path_step: usize,
     pub cur_pos: (u8, u8),
-    pub destination: (u8, u8),
+    pub dest_pos: (u8, u8),
 }
 
 // Might not need to derive default here, look into deleting in the future
@@ -42,8 +45,22 @@ pub struct Packet {
     data: PacketData,
 }
 
-//impl Packet {
-//    pub fn new(data: u64) -> Self {
-//        let metadata = MetaData { id:  };
-//    }
-//}
+impl Packet {
+    fn get_id() -> usize {
+        static PACKET_COUNTER: AtomicUsize = AtomicUsize::new(0);
+        PACKET_COUNTER.fetch_add(1, Ordering::Relaxed)
+    }
+
+    pub fn new(data: PacketData, src_pos: (u8, u8), dest_pos: (u8, u8)) -> Self {
+        let header = MetaData {
+            id: Packet::get_id(),
+            dir: Direction::Init,
+            path: Vec::new(),
+            path_step: 0,
+            cur_pos: src_pos,
+            dest_pos,
+        };
+
+        Self { header, data }
+    }
+}

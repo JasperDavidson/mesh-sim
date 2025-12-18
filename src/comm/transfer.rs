@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use thiserror::Error;
 use tokio::select;
 use tokio::sync::mpsc::error::SendError;
@@ -5,7 +7,7 @@ use tokio::sync::mpsc::{Receiver, Sender, UnboundedSender};
 
 use crate::comm::packet::{Event, Packet};
 
-#[derive(Copy, Clone, Default, Debug)]
+#[derive(Copy, Clone, PartialEq, Default, Debug)]
 pub enum Direction {
     Up,
     Down,
@@ -59,65 +61,45 @@ pub enum NodeCommError {
 //      - For now we'll simulate it as if every node in the middle is simply routing, but a V2
 //      might simulate both router and cpu running at the same time -> local channel?
 
-fn turn_restrict(
-    path_vec: &mut Vec<Direction>,
-    greedy_preferences: &[Direction; 2],
-    prev_dir: &Direction,
-    cur_pos: &mut (u8, u8),
-) {
-    let dir_chosen;
-
-    if matches!(
-        (prev_dir, &greedy_preferences[0]),
-        (Direction::Up, Direction::Left) | (Direction::Right, Direction::Down)
-    ) {
-        dir_chosen = greedy_preferences[1];
-        path_vec.push(dir_chosen);
-    } else {
-        dir_chosen = greedy_preferences[0];
-        path_vec.push(dir_chosen);
-    }
-
-    match dir_chosen {
-        Direction::Up => cur_pos.1 -= 1,
-        Direction::Down => cur_pos.1 += 1,
-        Direction::Left => cur_pos.0 -= 1,
-        Direction::Right => cur_pos.0 += 1,
-        Direction::Init => unreachable!(),
-    }
-}
-
 pub fn calc_path(mut cur_pos: (u8, u8), dest_pos: (u8, u8)) -> Vec<Direction> {
     let mut x_delta = dest_pos.0 as i16 - cur_pos.0 as i16;
     let mut y_delta = dest_pos.1 as i16 - cur_pos.1 as i16;
     let mut path_vec = Vec::new();
-    let mut greedy_preferences;
-    let prev_dir = Direction::Init;
+    let mut neg_first_greedy;
 
+    let mut chosen_path: Vec<Direction>;
     while !(x_delta == 0 && y_delta == 0) {
         if x_delta > 0 && y_delta > 0 {
-            greedy_preferences = [Direction::Down, Direction::Right];
+            neg_first_greedy = Direction::Down;
         } else if x_delta > 0 && y_delta < 0 {
-            greedy_preferences = [Direction::Right, Direction::Up];
+            neg_first_greedy = Direction::Right;
         } else if x_delta < 0 && y_delta > 0 {
-            greedy_preferences = [Direction::Left, Direction::Down];
+            neg_first_greedy = Direction::Left;
         } else if x_delta < 0 && y_delta < 0 {
-            greedy_preferences = [Direction::Left, Direction::Up];
+            neg_first_greedy = Direction::Left;
         } else if x_delta == 0 && y_delta < 0 {
-            greedy_preferences = [Direction::Up, Direction::Down];
+            neg_first_greedy = Direction::Up;
         } else if x_delta == 0 && y_delta > 0 {
-            greedy_preferences = [Direction::Down, Direction::Up];
+            neg_first_greedy = Direction::Down;
         } else if y_delta == 0 && x_delta < 0 {
-            greedy_preferences = [Direction::Left, Direction::Right];
+            neg_first_greedy = Direction::Left;
         } else
         /* y_delta == 0 && x_delta > 0 */
         {
-            greedy_preferences = [Direction::Right, Direction::Left];
+            neg_first_greedy = Direction::Right;
         }
 
-        turn_restrict(&mut path_vec, &greedy_preferences, &prev_dir, &mut cur_pos);
-        x_delta = dest_pos.0 as i16 - cur_pos.0 as i16;
-        y_delta = dest_pos.1 as i16 - cur_pos.1 as i16;
+        if neg_first_greedy == Direction::Left || neg_first_greedy == Direction::Right {
+            chosen_path = vec![neg_first_greedy; x_delta.abs() as usize];
+            x_delta = 0;
+            cur_pos.0 = cur_pos.0 + x_delta as u8;
+        } else {
+            chosen_path = vec![neg_first_greedy; y_delta.abs() as usize];
+            y_delta = 0;
+            cur_pos.1 = cur_pos.1 + y_delta as u8;
+        }
+
+        path_vec.append(&mut chosen_path);
     }
 
     path_vec
@@ -143,9 +125,11 @@ pub async fn receive_packets(
     inner_tx_left: &Sender<Packet>,
     inner_tx_right: &Sender<Packet>,
     event_tx: &UnboundedSender<Event>,
+    tx_rate: u64,
 ) -> Result<(), NodeCommError> {
     loop {
         // let node_clone = Arc::clone(&node);
+        tokio::time::sleep(std::time::Duration::from_millis((1 / tx_rate) * 1000)).await;
         select! {
             Some(mut packet) = async {
                 if let Some(rx) = rx_up.as_mut() {
@@ -154,14 +138,13 @@ pub async fn receive_packets(
                     std::future::pending().await
                 }
             } => {
+                packet.header.cur_pos = (packet.header.cur_pos.0, packet.header.cur_pos.1 + 1);
                 if packet.header.path_step == packet.header.path.len() {
-                        event_tx.send(Event::PacketArrived { id: packet.header.id, at: packet.header.destination })?;
+                        event_tx.send(Event::PacketArrived { id: packet.header.id, at: packet.header.cur_pos, dest: packet.header.dest_pos })?;
                         continue;
                 }
-                packet.header.cur_pos = (packet.header.cur_pos.0, packet.header.cur_pos.1 + 1);
                 event_tx.send(Event::PacketReceived { id: packet.header.id, recv_dir: Direction::Up, at: packet.header.cur_pos })?;
                 inner_tx_up.send(packet).await?;
-                // tokio::spawn(async move { send_packet(node_clone, packet).await });
             },
             Some(mut packet) = async {
                 if let Some(rx) = rx_down.as_mut() {
@@ -170,14 +153,13 @@ pub async fn receive_packets(
                     std::future::pending().await
                 }
             } => {
+                packet.header.cur_pos = (packet.header.cur_pos.0, packet.header.cur_pos.1 - 1);
                 if packet.header.path_step == packet.header.path.len() {
-                        event_tx.send(Event::PacketArrived { id: packet.header.id, at: packet.header.destination })?;
+                        event_tx.send(Event::PacketArrived { id: packet.header.id, at: packet.header.cur_pos, dest: packet.header.dest_pos })?;
                         continue;
                 }
-                packet.header.cur_pos = (packet.header.cur_pos.0, packet.header.cur_pos.1 - 1);
                 event_tx.send(Event::PacketReceived { id: packet.header.id, recv_dir: Direction::Down, at: packet.header.cur_pos })?;
                 inner_tx_down.send(packet).await?;
-                // tokio::spawn(async move { send_packet(node_clone, packet).await });
             },
             Some(mut packet) = async {
                 if let Some(rx) = rx_left.as_mut() {
@@ -186,14 +168,13 @@ pub async fn receive_packets(
                     std::future::pending().await
                 }
             } => {
+                packet.header.cur_pos = (packet.header.cur_pos.0 + 1, packet.header.cur_pos.1);
                 if packet.header.path_step == packet.header.path.len() {
-                        event_tx.send(Event::PacketArrived { id: packet.header.id, at: packet.header.destination })?;
+                        event_tx.send(Event::PacketArrived { id: packet.header.id, at: packet.header.cur_pos, dest: packet.header.dest_pos })?;
                         continue;
                 }
-                packet.header.cur_pos = (packet.header.cur_pos.0 + 1, packet.header.cur_pos.1);
                 event_tx.send(Event::PacketReceived { id: packet.header.id, recv_dir: Direction::Left, at: packet.header.cur_pos })?;
                 inner_tx_left.send(packet).await?;
-                // tokio::spawn(async move { send_packet(node_clone, packet).await });
             },
             Some(mut packet) = async {
                 if let Some(rx) = rx_right.as_mut() {
@@ -202,14 +183,13 @@ pub async fn receive_packets(
                     std::future::pending().await
                 }
             } => {
+                packet.header.cur_pos = (packet.header.cur_pos.0 - 1, packet.header.cur_pos.1);
                 if packet.header.path_step == packet.header.path.len() {
-                        event_tx.send(Event::PacketArrived { id: packet.header.id, at: packet.header.destination })?;
+                        event_tx.send(Event::PacketArrived { id: packet.header.id, at: packet.header.cur_pos, dest: packet.header.dest_pos })?;
                         continue;
                 }
-                packet.header.cur_pos = (packet.header.cur_pos.0 - 1, packet.header.cur_pos.1);
                 event_tx.send(Event::PacketReceived { id: packet.header.id, recv_dir: Direction::Right, at: packet.header.cur_pos })?;
                 inner_tx_right.send(packet).await?;
-                // tokio::spawn(async move { send_packet(node_clone, packet).await });
             },
         }
     }
@@ -230,8 +210,10 @@ pub async fn send_packet(
     mut inner_rx_left: Receiver<Packet>,
     mut inner_rx_right: Receiver<Packet>,
     mut inner_rx_local: Receiver<Packet>,
+    rx_rate: u64,
 ) -> Result<(), NodeCommError> {
     loop {
+        tokio::time::sleep(Duration::from_millis((1 / rx_rate) * 1000)).await;
         select! {
             Some(inner_packet) = inner_rx_up.recv() => {
                 transmit_dir(inner_packet, tx_up, tx_down, tx_left, tx_right, &tx_event).await?
