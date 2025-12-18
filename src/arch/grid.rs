@@ -48,6 +48,7 @@ impl Grid {
             tx_left: Option<Sender<Packet>>,
             tx_right: Option<Sender<Packet>>,
         }
+        let mut rx_local_map: HashMap<(u8, u8), Receiver<Packet>> = HashMap::new();
         let mut channel_map: HashMap<(u8, u8), ChannelHolder> = HashMap::new();
 
         let mut temp_nodes: Vec<Vec<MeshNode>> = Vec::new();
@@ -55,36 +56,42 @@ impl Grid {
             let mut grid_row = Vec::new();
 
             for x in 0..width {
-                let cur_node = MeshNode::init_channeless(x, y, 10, 10);
+                let (tx_local, rx_local) = mpsc::channel::<Packet>(INNER_BUFFER_SIZE);
+                let cur_node = MeshNode::init_channeless(x, y, 10, 10, tx_local);
+                rx_local_map.insert((x, y), rx_local);
 
                 // Create channels based on position
                 if y < height {
                     let (tx_down, rx_down) = mpsc::channel::<Packet>(LINK_BUFFER_SIZE);
 
+                    let cur_node = channel_map.entry((x, y)).or_default();
+                    cur_node.tx_down = Some(tx_down);
                     let up_node = channel_map.entry((x, y + 1)).or_default();
                     up_node.rx_up = Some(rx_down);
-                    up_node.tx_down = Some(tx_down);
                 }
                 if y > 0 {
                     let (tx_up, rx_up) = mpsc::channel::<Packet>(LINK_BUFFER_SIZE);
 
+                    let cur_node = channel_map.entry((x, y)).or_default();
+                    cur_node.tx_up = Some(tx_up);
                     let down_node = channel_map.entry((x, y - 1)).or_default();
                     down_node.rx_down = Some(rx_up);
-                    down_node.tx_up = Some(tx_up);
                 }
                 if x > 0 {
                     let (tx_left, rx_left) = mpsc::channel::<Packet>(LINK_BUFFER_SIZE);
 
+                    let cur_node = channel_map.entry((x, y)).or_default();
+                    cur_node.tx_left = Some(tx_left);
                     let right_node = channel_map.entry((x - 1, y)).or_default();
                     right_node.rx_right = Some(rx_left);
-                    right_node.tx_left = Some(tx_left);
                 }
                 if x < width {
                     let (tx_right, rx_right) = mpsc::channel::<Packet>(LINK_BUFFER_SIZE);
 
+                    let cur_node = channel_map.entry((x, y)).or_default();
+                    cur_node.tx_right = Some(tx_right);
                     let left_node = channel_map.entry((x + 1, y)).or_default();
                     left_node.rx_left = Some(rx_right);
-                    left_node.tx_right = Some(tx_right);
                 }
 
                 grid_row.push(cur_node);
@@ -92,21 +99,6 @@ impl Grid {
 
             temp_nodes.push(grid_row);
         }
-
-        // Assign the rx channels
-        //        for y in 0..height {
-        //            for x in 0..width {
-        //                let cur_node = &mut temp_nodes[y as usize][x as usize];
-        //                if let Some(rx_conns) = rx_map.get_mut(&(x, y)) {
-        //                    tokio::spawn(async move {});
-        //
-        //                    cur_node.rx_up = mem::take(&mut rx_conns.up);
-        //                    cur_node.rx_down = mem::take(&mut rx_conns.down);
-        //                    cur_node.rx_left = mem::take(&mut rx_conns.left);
-        //                    cur_node.rx_right = mem::take(&mut rx_conns.right);
-        //                }
-        //            }
-        //        }
 
         // Create the Arc MeshNode holder for thread safe access + optimized space usage
         let inner_nodes_arc: Vec<Arc<[MeshNode]>> = temp_nodes
@@ -142,33 +134,38 @@ impl Grid {
                 let (inner_tx_left, inner_rx_left) = mpsc::channel(INNER_BUFFER_SIZE);
                 let (inner_tx_right, inner_rx_right) = mpsc::channel(INNER_BUFFER_SIZE);
 
-                tokio::spawn(async move {
-                    receive_packets(
-                        rx_up,
-                        rx_down,
-                        rx_left,
-                        rx_right,
-                        inner_tx_up,
-                        inner_tx_down,
-                        inner_tx_left,
-                        inner_tx_right,
-                    )
-                    .await
-                });
+                if let Some(inner_rx_local) = rx_local_map.remove(&(x, y)) {
+                    tokio::spawn(async move {
+                        receive_packets(
+                            rx_up,
+                            rx_down,
+                            rx_left,
+                            rx_right,
+                            inner_tx_up,
+                            inner_tx_down,
+                            inner_tx_left,
+                            inner_tx_right,
+                        )
+                        .await
+                    });
 
-                tokio::spawn(async move {
-                    send_packet(
-                        tx_up,
-                        tx_down,
-                        tx_left,
-                        tx_right,
-                        inner_rx_up,
-                        inner_rx_down,
-                        inner_rx_left,
-                        inner_rx_right,
-                    )
-                    .await
-                });
+                    tokio::spawn(async move {
+                        send_packet(
+                            tx_up,
+                            tx_down,
+                            tx_left,
+                            tx_right,
+                            inner_rx_up,
+                            inner_rx_down,
+                            inner_rx_left,
+                            inner_rx_right,
+                            inner_rx_local,
+                        )
+                        .await
+                    });
+                } else {
+                    panic!("Failed to retrieve inner rx for node ({x}, {y})");
+                }
             }
         }
     }
@@ -187,16 +184,16 @@ impl Grid {
 
     // Takes a packet and sends it from a src node to a destination node
     // Calculates the first direction and enquues in that mpsc tx, nodes carry from there
-    //    pub async fn send_packet_grid(
-    //        &mut self,
-    //        mut packet: Packet,
-    //        src_pos: (u8, u8),
-    //        dest_pos: (u8, u8),
-    //    ) -> Result<(), NodeCommError> {
-    //        packet.header.destination = dest_pos;
-    //        packet.header.path = calc_path(src_pos, dest_pos);
-    //        self.path_map.insert(packet.header.id, packet_path);
-    //
-    //        Ok(())
-    //    }
+    pub async fn send_packet_grid(
+        node: &MeshNode,
+        mut packet: Packet,
+        dest_pos: (u8, u8),
+    ) -> Result<(), NodeCommError> {
+        packet.header.destination = dest_pos;
+        packet.header.path = calc_path((node.x, node.y), dest_pos);
+
+        node.tx_local.send(packet).await?;
+
+        Ok(())
+    }
 }

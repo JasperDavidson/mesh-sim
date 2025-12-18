@@ -128,10 +128,10 @@ fn turn_restrict(
     }
 
     match dir_chosen {
-        Direction::Up => cur_pos.0 -= 1,
-        Direction::Down => cur_pos.0 += 1,
-        Direction::Left => cur_pos.1 -= 1,
-        Direction::Right => cur_pos.1 += 1,
+        Direction::Up => cur_pos.1 -= 1,
+        Direction::Down => cur_pos.1 += 1,
+        Direction::Left => cur_pos.0 -= 1,
+        Direction::Right => cur_pos.0 += 1,
         Direction::Init => unreachable!(),
     }
 }
@@ -143,7 +143,7 @@ pub fn calc_path(mut cur_pos: (u8, u8), dest_pos: (u8, u8)) -> Vec<Direction> {
     let mut greedy_preferences;
     let prev_dir = Direction::Init;
 
-    while x_delta != 0 && y_delta != 0 {
+    while !(x_delta == 0 && y_delta == 0) {
         if x_delta > 0 && y_delta > 0 {
             greedy_preferences = [Direction::Down, Direction::Right];
         } else if x_delta > 0 && y_delta < 0 {
@@ -191,7 +191,7 @@ pub async fn receive_packets(
     inner_tx_down: Sender<Packet>,
     inner_tx_left: Sender<Packet>,
     inner_tx_right: Sender<Packet>,
-) {
+) -> Result<(), NodeCommError> {
     loop {
         // let node_clone = Arc::clone(&node);
         select! {
@@ -203,7 +203,10 @@ pub async fn receive_packets(
                 }
             } => {
                 println!(" -> Receiving from up!\n");
-                inner_tx_up.send(packet).await;
+                if packet.header.path_step == packet.header.path.len() {
+                        panic!("Packet reached destination");
+                }
+                inner_tx_up.send(packet).await?;
                 // tokio::spawn(async move { send_packet(node_clone, packet).await });
             },
             Some(packet) = async {
@@ -214,7 +217,10 @@ pub async fn receive_packets(
                 }
             } => {
                 println!(" -> Receiving from down!\n");
-                inner_tx_down.send(packet).await;
+                if packet.header.path_step == packet.header.path.len() {
+                        panic!("Packet reached destination");
+                }
+                inner_tx_down.send(packet).await?;
                 // tokio::spawn(async move { send_packet(node_clone, packet).await });
             },
             Some(packet) = async {
@@ -225,7 +231,10 @@ pub async fn receive_packets(
                 }
             } => {
                 println!(" -> Receiving from left!\n");
-                inner_tx_left.send(packet).await;
+                if packet.header.path_step == packet.header.path.len() {
+                        panic!("Packet reached destination");
+                }
+                inner_tx_left.send(packet).await?;
                 // tokio::spawn(async move { send_packet(node_clone, packet).await });
             },
             Some(packet) = async {
@@ -236,7 +245,10 @@ pub async fn receive_packets(
                 }
             } => {
                 println!(" -> Receiving from right!\n");
-                inner_tx_right.send(packet).await;
+                if packet.header.path_step == packet.header.path.len() {
+                        panic!("Packet reached destination");
+                }
+                inner_tx_right.send(packet).await?;
                 // tokio::spawn(async move { send_packet(node_clone, packet).await });
             },
         }
@@ -256,118 +268,70 @@ pub async fn send_packet(
     mut inner_rx_down: Receiver<Packet>,
     mut inner_rx_left: Receiver<Packet>,
     mut inner_rx_right: Receiver<Packet>,
+    mut inner_rx_local: Receiver<Packet>,
 ) -> Result<(), NodeCommError> {
-    //    packet.header.dir = node.calc_route(
-    //        (packet.header.destination.0, packet.header.destination.1),
-    //        &packet.header.dir,
-    //    );
-
     loop {
         select! {
-            Some(mut inner_packet) = inner_rx_up.recv() => {
-                inner_packet.header.dir = inner_packet.header.path[inner_packet.header.path_step];
-                inner_packet.header.path_step += 1;
-                transmit_dir(inner_packet, tx_up.as_ref(), tx_down.as_ref(), tx_left.as_ref(), tx_right.as_ref()).await;
+            Some(inner_packet) = inner_rx_up.recv() => {
+                transmit_dir(inner_packet, tx_up.as_ref(), tx_down.as_ref(), tx_left.as_ref(), tx_right.as_ref()).await?
             }
-            Some(mut inner_packet) = inner_rx_down.recv() => {
-                inner_packet.header.dir = inner_packet.header.path[inner_packet.header.path_step];
-                inner_packet.header.path_step += 1;
-                transmit_dir(inner_packet, tx_up.as_ref(), tx_down.as_ref(), tx_left.as_ref(), tx_right.as_ref()).await;
+            Some(inner_packet) = inner_rx_down.recv() => {
+                transmit_dir(inner_packet, tx_up.as_ref(), tx_down.as_ref(), tx_left.as_ref(), tx_right.as_ref()).await?
             }
-            Some(mut inner_packet) = inner_rx_left.recv() => {
-                inner_packet.header.dir = inner_packet.header.path[inner_packet.header.path_step];
-                inner_packet.header.path_step += 1;
-                transmit_dir(inner_packet, tx_up.as_ref(), tx_down.as_ref(), tx_left.as_ref(), tx_right.as_ref()).await;
+            Some(inner_packet) = inner_rx_left.recv() => {
+                transmit_dir(inner_packet, tx_up.as_ref(), tx_down.as_ref(), tx_left.as_ref(), tx_right.as_ref()).await?
             }
-            Some(mut inner_packet) = inner_rx_right.recv() => {
-                inner_packet.header.dir = inner_packet.header.path[inner_packet.header.path_step];
-                inner_packet.header.path_step += 1;
-                transmit_dir(inner_packet, tx_up.as_ref(), tx_down.as_ref(), tx_left.as_ref(), tx_right.as_ref()).await;
+            Some(inner_packet) = inner_rx_right.recv() => {
+                transmit_dir(inner_packet, tx_up.as_ref(), tx_down.as_ref(), tx_left.as_ref(), tx_right.as_ref()).await?
+            },
+            Some(inner_packet) = inner_rx_local.recv() => {
+                transmit_dir(inner_packet, tx_up.as_ref(), tx_down.as_ref(), tx_left.as_ref(), tx_right.as_ref()).await?
             }
         }
     }
-
-    // TODO Look into error propagation handling in async task
-    //    match packet.header.dir {
-    //        Direction::Up => {
-    //            print!(" -> Chose up");
-    //            node.tx_up
-    //                .as_ref()
-    //                .ok_or_else(|| NodeCommError::SendDirError(SendDirError::Up))?
-    //                .send(packet)
-    //                .await?
-    //        }
-    //        Direction::Down => {
-    //            print!(" -> Chose down");
-    //            node.tx_down
-    //                .as_ref()
-    //                .ok_or_else(|| NodeCommError::SendDirError(SendDirError::Down))?
-    //                .send(packet)
-    //                .await?
-    //        }
-    //        Direction::Left => {
-    //            print!(" -> Chose left");
-    //            node.tx_left
-    //                .as_ref()
-    //                .ok_or_else(|| NodeCommError::SendDirError(SendDirError::Left))?
-    //                .send(packet)
-    //                .await?
-    //        }
-    //        Direction::Right => {
-    //            print!(" -> Chose right");
-    //            let tx = node
-    //                .tx_right
-    //                .as_ref()
-    //                .ok_or_else(|| NodeCommError::SendDirError(SendDirError::Right))?;
-    //
-    //            // Handle the result explicitly to see the error
-    //            match tx.send(packet).await {
-    //                Ok(_) => println!("Packet sent!"),
-    //                Err(e) => println!("Failed to send packet: {:?}", e),
-    //            }
-    //        }
-    //        _ => unreachable!(),
-    //    }
-    //
-    //    Ok(())
 }
 
 async fn transmit_dir(
-    packet: Packet,
+    mut packet: Packet,
     tx_up: Option<&Sender<Packet>>,
     tx_down: Option<&Sender<Packet>>,
     tx_left: Option<&Sender<Packet>>,
     tx_right: Option<&Sender<Packet>>,
-) {
+) -> Result<(), NodeCommError> {
+    packet.header.dir = packet.header.path[packet.header.path_step];
+    packet.header.path_step += 1;
+
     match packet.header.dir {
         Direction::Up => {
             print!(" -> Chose up");
             tx_up
                 .expect("Up direction should've been supported")
                 .send(packet)
-                .await;
+                .await?
         }
         Direction::Down => {
             print!(" -> Chose down");
             tx_down
                 .expect("Down direction should've been supported")
                 .send(packet)
-                .await;
+                .await?
         }
         Direction::Left => {
             print!(" -> Chose left");
             tx_left
                 .expect("Left direction should've been supported")
                 .send(packet)
-                .await;
+                .await?
         }
         Direction::Right => {
             print!(" -> Chose right");
             tx_right
                 .expect("Right direction should've been supported")
                 .send(packet)
-                .await;
+                .await?
         }
         _ => unreachable!(),
     }
+
+    Ok(())
 }

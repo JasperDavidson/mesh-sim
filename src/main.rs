@@ -1,7 +1,6 @@
 mod arch;
 mod comm;
-use crate::{arch::grid::Grid, arch::grid::send_packet_grid, comm::packet::Packet};
-use std::sync::Arc;
+use crate::{arch::grid::Grid, comm::packet::Packet};
 
 #[tokio::main]
 async fn main() {
@@ -9,8 +8,8 @@ async fn main() {
     grid.init_grid(5, 5);
 
     let packet = Packet::default();
-    if let Ok(src_node) = grid.access_node((2, 4)) {
-        send_packet_grid(packet, Arc::clone(&src_node), (1, 0))
+    if let Ok(src_node) = grid.access_node((4, 3)) {
+        Grid::send_packet_grid(src_node, packet, (1, 0))
             .await
             .expect("Failed to send packet");
     }
